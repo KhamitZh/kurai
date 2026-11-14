@@ -1,7 +1,7 @@
 // NNN Куратор — негізгі қосымша
 import { h, icon, uid, fmt, fmtPct, parseNum, toast, modal, confirmBox, copyText } from './util.js';
 import {
-  store, loadSettings, loadGroup, saveGroup, saveSettings, saveSettingsNow, openFolder, saveAppSettings,
+  store, loadSettings, loadGroup, saveGroup, saveSettings, saveSettingsNow, openFolder, saveAppSettings, pickFolder,
   defaultTemplate, DEFAULT_MESSAGES, DEFAULT_TASK_NAMES,
 } from './store.js';
 import {
@@ -112,15 +112,62 @@ async function homeView() {
   }
 }
 
+// ======================= Папка өрісі =======================
+// Өрісті не «Таңдау» батырмасын басқанда Windows Проводник ашылады,
+// таңдалған папка бірден өрісте көрінеді. Қажет болса жолды қолмен де жазуға болады.
+const cleanPath = (v) => String(v || '').trim().replace(/^["'«“]+|["'»”]+$/g, '').trim();
+function folderField({ value = '', onPick } = {}) {
+  const local = store.app.isLocal !== false;
+  const input = h('input', {
+    class: 'input folder-input', value, readonly: true, spellcheck: false, title: value,
+    placeholder: local ? 'Басып, папканы таңдаңыз' : 'Папканы компьютерден таңдаңыз',
+    'aria-label': 'Папка',
+  });
+  const btnLabel = h('span', {}, 'Таңдау');
+  const btn = h('button', { type: 'button', class: 'btn' }, icon('folder'), btnLabel);
+  const manual = h('button', { type: 'button', class: 'link-btn' }, 'Жолды қолмен жазу');
+  let busy = false;
+  const showEnd = () => requestAnimationFrame(() => { input.scrollLeft = input.scrollWidth; });
+  const set = (v) => { input.value = v; input.title = v; showEnd(); };
+  setTimeout(showEnd, 60);
+  const pick = async () => {
+    if (!local || busy || !input.readOnly) return;
+    busy = true; btn.disabled = true; btnLabel.textContent = 'Терезе ашық…';
+    try {
+      const p = await pickFolder(cleanPath(input.value));
+      if (p) {
+        set(p);
+        input.classList.remove('picked'); void input.offsetWidth; input.classList.add('picked');
+        onPick && onPick(p);
+      }
+    } catch (e) { toast(e.message, 'err'); } finally {
+      busy = false; btn.disabled = false; btnLabel.textContent = 'Таңдау';
+    }
+  };
+  input.addEventListener('click', pick);
+  input.addEventListener('keydown', (e) => { if (input.readOnly && (e.key === 'Enter' || e.key === ' ')) { e.preventDefault(); pick(); } });
+  btn.addEventListener('click', pick);
+  manual.addEventListener('click', () => {
+    input.readOnly = false; input.placeholder = 'Мысалы: D:\\NNN'; input.focus(); input.select(); manual.remove();
+  });
+  input.addEventListener('change', () => { set(cleanPath(input.value)); onPick && onPick(input.value); });
+  const el = h('div', { class: 'folder-field' }, h('div', { class: 'inline-field' }, input, local ? btn : null), local ? manual : null);
+  return { el, input, get value() { return cleanPath(input.value); }, set value(v) { set(v); } };
+}
+
 // ======================= Жаңа топ =======================
 function newGroupDialog() {
   let subject = 'math';
   const name = h('input', { class: 'input', placeholder: 'Мысалы: ИНФО 2-ЛЕК' });
   const code = h('input', { class: 'input', placeholder: 'ИНФО-2' });
-  const folder = h('input', { class: 'input' });
-  let codeTouched = false, folderTouched = false;
+  let codeTouched = false, folderTouched = false, subjectTouched = false;
+  const folder = folderField({ onPick: () => { folderTouched = true; } });
   const suggest = () => {
-    const num = (name.value.match(/\d+/) || [''])[0];
+    if (!subjectTouched) {
+      const guess = /инфо/i.test(name.value) ? 'info' : /мат/i.test(name.value) ? 'math' : null;
+      if (guess && guess !== subject) { subject = guess; segBtns.forEach((b) => b.classList.toggle('on', b.textContent === SUBJECT[guess])); }
+    }
+    const num =(name.value.match(/\d+/) || [''])[0];
     const short = subject === 'info' ? 'ИНФО' : 'МАТ';
     const c = num ? `${short}-${num}` : short;
     if (!codeTouched) code.value = c;
@@ -128,11 +175,10 @@ function newGroupDialog() {
   };
   name.addEventListener('input', suggest);
   code.addEventListener('input', () => { codeTouched = true; });
-  folder.addEventListener('input', () => { folderTouched = true; });
   const seg = h('div', { class: 'seg' });
   const segBtns = Object.entries(SUBJECT).map(([k, v]) => h('button', {
     type: 'button', class: k === subject ? 'on' : '',
-    onclick: () => { subject = k; segBtns.forEach((b) => b.classList.toggle('on', b.textContent === v)); suggest(); },
+    onclick: () => { subject = k; subjectTouched = true; segBtns.forEach((b) => b.classList.toggle('on', b.textContent === v)); suggest(); },
   }, v));
   seg.append(...segBtns);
   suggest();
@@ -141,17 +187,16 @@ function newGroupDialog() {
     body: [
       h('label', { class: 'field' }, h('span', {}, 'Топтың аты'), name),
       h('div', { class: 'field' }, h('span', {}, 'Пәні'), seg, h('small', {}, 'Ата-ана мәтінінде «математикадан» не «информатикадан» деп жазылады.')),
-      h('div', { class: 'grid-2' },
-        h('label', { class: 'field' }, h('span', {}, 'Файл коды'), code, h('small', {}, 'Файл аты: РТ_8_АПТА_<код>.xlsx')),
-        h('label', { class: 'field' }, h('span', {}, 'Сақталатын папка'), folder, h('small', {}, 'Excel, сурет, отчет пен деректер осында сақталады.'))),
+      h('label', { class: 'field' }, h('span', {}, 'Файл коды'), code, h('small', {}, 'Файл аты: РТ_8_АПТА_<код>.xlsx')),
+      h('div', { class: 'field' }, h('span', {}, 'Сақталатын папка'), folder.el, h('small', {}, 'Excel, сурет, отчет пен деректер осында сақталады. Папка жоқ болса, өзі ашылады.')),
     ],
     foot: [
       h('button', { class: 'btn', onclick: () => m.close() }, 'Бас тарту'),
       h('button', {
         class: 'btn primary', onclick: async () => {
           if (!name.value.trim()) { name.focus(); return toast('Топтың атын жазыңыз', 'err'); }
-          if (!folder.value.trim()) { folder.focus(); return toast('Папканы көрсетіңіз', 'err'); }
-          const g = { id: uid(), name: name.value.trim(), subject, code: (code.value.trim() || name.value.trim()).replace(/\s+/g, '-'), folder: folder.value.trim() };
+          if (!folder.value) { folder.input.focus(); return toast('Папканы таңдаңыз', 'err'); }
+          const g = { id: uid(), name: name.value.trim(), subject, code: (code.value.trim() || name.value.trim()).replace(/\s+/g, '-'), folder: folder.value };
           store.settings.groups.push(g);
           try {
             await saveSettingsNow();
@@ -357,7 +402,9 @@ function setupPanel(meta, group) {
     h('div', { class: 'grid-3' },
       field('Топтың аты', meta.name, (v) => { meta.name = v.trim() || meta.name; saveSettings(); renderSide(meta.id); }, 'Отчетта «МАТ 4-ЛЕК 8-АПТА» болып шығады'),
       field('Файл коды', meta.code, (v) => { meta.code = v.trim() || meta.code; saveSettings(); }, `Мысалы: РТ_8_АПТА_${meta.code}.xlsx`),
-      field('Сақталатын папка', meta.folder, (v) => { meta.folder = v.trim() || meta.folder; saveSettings(); }, 'Деректер файлы да осында тұрады')),
+      h('div', { class: 'field' }, h('span', {}, 'Сақталатын папка'),
+        folderField({ value: meta.folder, onPick: (v) => { if (v) { meta.folder = v; saveSettings(); toast('Топ папкасы өзгертілді', 'ok'); } } }).el,
+        h('small', {}, 'Деректер файлы да осында тұрады'))),
   ));
 
   // Сабақ тапсырмалары
@@ -953,7 +1000,7 @@ function setupView() {
     return;
   }
   const name = h('input', { class: 'input', placeholder: 'Мысалы: Сейітқали Айгерім', autocomplete: 'name' });
-  const folder = h('input', { class: 'input', value: store.app.dataRootChosen ? store.dataRoot : store.app.defaultDataRoot || store.dataRoot });
+  const folder = folderField({ value: store.app.dataRootChosen ? store.dataRoot : store.app.defaultDataRoot || store.dataRoot });
   const pin = h('input', { class: 'input', inputmode: 'numeric', maxlength: 6, placeholder: '6 сан', autocomplete: 'new-password', type: 'password' });
   const pinRow = store.app.hasPin
     ? h('p', { class: 'hint', style: { margin: 0 } }, 'Телефон PIN-коды бұрыннан орнатылған. Оны кейін «Баптаулар» бетінде өзгертуге болады.')
@@ -966,18 +1013,18 @@ function setupView() {
     h('h1', { class: 'title' }, 'Қош келдіңіз!'),
     h('p', { class: 'hint', style: { marginTop: '-4px' } }, 'Сайтты қолданбас бұрын өзіңіз туралы үш нәрсені толтырыңыз. Мұның бәрін кейін «Баптаулар» бетінде өзгертуге болады.'),
     h('label', { class: 'field' }, h('span', {}, 'Аты-жөніңіз'), name, h('small', {}, 'Басшыға арналған отчеттың бірінші слайдында шығады.')),
-    h('label', { class: 'field' }, h('span', {}, 'Деректер сақталатын папка'), folder,
+    h('div', { class: 'field' }, h('span', {}, 'Деректер сақталатын папка'), folder.el,
       h('small', {}, 'Топтар, баллдар, Excel және отчеттар осы папкада сақталады. Мысалы: D:\\NNN')),
     pinRow, err, btn);
   form.addEventListener('submit', async (ev) => {
     ev.preventDefault();
     err.textContent = '';
     if (!name.value.trim()) { err.textContent = 'Аты-жөніңізді жазыңыз.'; return name.focus(); }
-    if (!folder.value.trim()) { err.textContent = 'Папканы көрсетіңіз.'; return folder.focus(); }
+    if (!folder.value) { err.textContent = 'Папканы таңдаңыз.'; return folder.input.focus(); }
     if (pin.value && !/^\d{6}$/.test(pin.value.trim())) { err.textContent = 'PIN-код дәл 6 саннан тұруы керек.'; return pin.focus(); }
     btn.disabled = true;
     try {
-      await saveAppSettings({ dataRoot: folder.value.trim(), pin: pin.value.trim() || undefined });
+      await saveAppSettings({ dataRoot: folder.value, pin: pin.value.trim() || undefined });
       // Таңдалған папкада бұрынғы деректер болса, соларды қолданамыз
       await loadSettings();
       const existed = store.configured;
@@ -1001,10 +1048,10 @@ function computerPanel() {
     return h('div', { class: 'panel' }, h('h2', { class: 'sub' }, 'Компьютер'),
       h('p', { class: 'hint', style: { margin: 0 } }, 'Папка мен PIN-кодты тек компьютердің өзінен өзгертуге болады.'));
   }
-  const folder = h('input', { class: 'input', value: store.dataRoot });
+  const folder = folderField({ value: store.dataRoot });
   const saveFolder = h('button', {
     class: 'btn', onclick: async () => {
-      const v = folder.value.trim();
+      const v = folder.value;
       if (v === store.dataRoot) return toast('Папка өзгермеді');
       if (!(await confirmBox('Деректер папкасын ауыстыру', `Сайт енді ${v} папкасындағы деректерді қолданады. Қазіргі деректер ${store.dataRoot} папкасында қалады — оларды қолмен көшіруге болады.`, 'Ауыстыру'))) return;
       try {
@@ -1034,7 +1081,7 @@ function computerPanel() {
   return h('div', { class: 'panel' },
     h('h2', { class: 'sub' }, 'Компьютер'),
     h('div', { class: 'grid-2' },
-      h('div', { class: 'field' }, h('span', {}, 'Деректер папкасы'), h('div', { class: 'inline-field' }, folder, saveFolder),
+      h('div', { class: 'field' }, h('span', {}, 'Деректер папкасы'), folder.el, saveFolder,
         h('small', {}, 'Топтар, баллдар, Excel және отчеттар осында сақталады.')),
       h('div', { class: 'field' }, h('span', {}, 'Телефон PIN-коды'), h('div', { class: 'inline-field' }, pin, savePin),
         h('small', {}, store.app.hasPin ? 'PIN-код орнатылған. Жаңасын жазып, өзгертуге болады.' : 'PIN-код әлі орнатылмаған.'))));

@@ -177,3 +177,9 @@ export async function saveAppSettings({ dataRoot, pin }) {
   store.groups = {};
   return r;
 }
+
+// Проводник арқылы папка таңдау (тек компьютерде). Бас тартса — null.
+export async function pickFolder(initial) {
+  const r = await api('POST', '/api/pick-folder', { initial });
+  return r.path || null;
+}

@@ -6,7 +6,7 @@
 const http = require('http');
 const fs = require('fs');
 const path = require('path');
-const { exec } = require('child_process');
+const { exec, execFile } = require('child_process');
 const os = require('os');
 const crypto = require('crypto');
 
@@ -149,6 +149,37 @@ function groupFolder(groupId) {
   return path.resolve(g.folder);
 }
 
+// Қолданушы қойған папка жолын тазалау: "D:\NNN" (тырнақшамен), file:///D:/NNN, D:/NNN/ т.б.
+function normalizeDir(input) {
+  let d = String(input || '').trim();
+  d = d.replace(/^["'«“]+|["'»”]+$/g, '').trim();
+  if (/^file:\/\//i.test(d)) {
+    try { d = decodeURIComponent(d.replace(/^file:\/+/i, '')); } catch (_) { d = d.replace(/^file:\/+/i, ''); }
+  }
+  if (process.platform === 'win32') {
+    d = d.replace(/\//g, '\\');
+    if (/^[a-zA-Z]:$/.test(d)) d += '\\';
+  }
+  if (!d || !path.isAbsolute(d)) return null;
+  const r = path.resolve(d);
+  return r.length > 3 ? r.replace(/[\\/]+$/, '') : r;
+}
+
+// Windows Проводник терезесі арқылы папка таңдау
+let pickerOpen = false;
+function pickFolderDialog(initial) {
+  return new Promise((resolve, reject) => {
+    if (process.platform !== 'win32') return reject(new Error('Папка таңдау терезесі тек Windows-та жұмыс істейді. Жолды қолмен жазыңыз.'));
+    const script = path.join(ROOT, 'scripts', 'pick-folder.ps1');
+    execFile('powershell.exe', ['-NoProfile', '-STA', '-ExecutionPolicy', 'Bypass', '-File', script, initial || ''],
+      { windowsHide: true, maxBuffer: 1024 * 1024, encoding: 'utf8' },
+      (err, stdout) => {
+        if (err) return reject(new Error('Папка таңдау терезесі ашылмады. Жолды қолмен жазыңыз.'));
+        resolve(String(stdout || '').replace(/^\uFEFF/, '').trim() || null);
+      });
+  });
+}
+
 function safeFileName(name) {
   const base = String(name || '').replace(/[\\/:*?"<>|]/g, '_').trim();
   if (!base || base.startsWith('.')) return null;
@@ -171,12 +202,12 @@ async function handleApi(req, res, url) {
     if (!isLocal(req)) return send(res, 403, { error: 'Бұл баптауды тек компьютердің өзінен өзгертуге болады' });
     const body = JSON.parse(await readBody(req, 100000));
     if (body.dataRoot != null) {
-      const dir = String(body.dataRoot).trim();
-      if (!dir || !path.isAbsolute(dir)) return send(res, 400, { error: 'Папканың толық жолын жазыңыз, мысалы D:\\NNN' });
+      const dir = normalizeDir(body.dataRoot);
+      if (!dir) return send(res, 400, { error: '«Таңдау» батырмасын басып, папканы таңдаңыз (немесе толық жолын жазыңыз, мысалы D:\\NNN).' });
       try { fs.mkdirSync(dir, { recursive: true }); } catch (e) {
         return send(res, 400, { error: `Папка ашылмады: ${dir}. Диск бар екенін тексеріңіз.` });
       }
-      DATA_ROOT = path.resolve(dir);
+      DATA_ROOT = dir;
       appConfig.dataRoot = DATA_ROOT;
     }
     if (body.pin != null && body.pin !== '') {
@@ -189,11 +220,40 @@ async function handleApi(req, res, url) {
     saveAppConfig();
     return send(res, 200, { ok: true, dataRoot: DATA_ROOT, settings: readJSON(SETTINGS_FILE(), null), hasPin: !!PIN_HASH });
   }
+  // Проводник арқылы папка таңдау (тек компьютердің өзінен)
+  if (p === '/api/pick-folder' && req.method === 'POST') {
+    if (!isLocal(req)) return send(res, 403, { error: 'Папканы тек компьютерден таңдауға болады' });
+    if (pickerOpen) return send(res, 409, { error: 'Папка таңдау терезесі ашық тұр — экранның төменгі жағындағы тапсырмалар тақтасын қараңыз.' });
+    const body = JSON.parse((await readBody(req, 10000)) || '{}');
+    pickerOpen = true;
+    try {
+      const chosen = await pickFolderDialog(normalizeDir(body.initial) || DATA_ROOT);
+      return send(res, 200, { path: chosen });
+    } catch (e) {
+      return send(res, 500, { error: e.message });
+    } finally {
+      pickerOpen = false;
+    }
+  }
+
+  // Папка жолын тексеру/тазалау (топ папкасы үшін)
+  if (p === '/api/normalize-folder' && req.method === 'POST') {
+    const body = JSON.parse((await readBody(req, 10000)) || '{}');
+    const dir = normalizeDir(body.path);
+    if (!dir) return send(res, 400, { error: 'Папканың толық жолы дұрыс емес. «Таңдау» батырмасын басыңыз.' });
+    return send(res, 200, { path: dir });
+  }
+
   if (p === '/api/settings' && req.method === 'PUT') {
     const data = JSON.parse(await readBody(req));
+    for (const g of data.groups || []) {
+      if (g.folder) g.folder = normalizeDir(g.folder) || g.folder;
+    }
     writeJSONSafe(SETTINGS_FILE(), data);
     for (const g of data.groups || []) {
-      if (g.folder) fs.mkdirSync(path.resolve(g.folder), { recursive: true });
+      if (g.folder) {
+        try { fs.mkdirSync(path.resolve(g.folder), { recursive: true }); } catch (_) {}
+      }
     }
     return send(res, 200, { ok: true });
   }
